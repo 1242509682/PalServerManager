@@ -12,10 +12,11 @@ namespace PalServerManager
     {
         private SrvMgr mgr;
         private DataGridView dgvConfig;
-        private Button btnSave, btnClose;
+        private Button btnSave, btnClose, btnInitConfig;
         private Dictionary<string, string> configPairs;
         private string configFilePath;
         private string optionSettingsLine;
+        private bool initSuccess = false;
 
         // 中文映射字典（完整）
         private static readonly Dictionary<string, string> CnEnMap = new()
@@ -138,51 +139,272 @@ namespace PalServerManager
             ["允许强化负重"] = "bAllowEnhanceStat_Weight",
             ["允许强化工作速度"] = "bAllowEnhanceStat_WorkSpeed",
             ["显示建筑玩家ID"] = "bEnableBuildingPlayerUIdDisplay",
-            ["建筑名称缓存TTL"] = "BuildingNameDisplayCacheTTLSeconds"
+            ["建筑名称缓存TTL"] = "BuildingNameDisplayCacheTTLSeconds",
+            ["允许敌方营地生成在据点附近"] = "bAllowEnemyCampSpawnNearBaseCamp",
         };
+
+        // ---- 构造函数 ----
+        public ConfigEditForm(string configPath)
+        {
+            InitializeComponent();
+            this.Font = new Font("微软雅黑", 9F);
+            this.AutoScaleMode = AutoScaleMode.Font;
+            configFilePath = configPath;
+            this.Load += ConfigEditForm_Load;
+        }
 
         public ConfigEditForm(SrvMgr manager)
         {
             mgr = manager;
-            string exePath = mgr.CurrentExePath;
-            if (string.IsNullOrEmpty(exePath) || !File.Exists(exePath))
-            {
-                MessageBox.Show("未检测到运行中的服务端或未设置服务端路径。\n请先启动或附加服务端，再打开配置编辑。", "提示", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                this.Close();
-                return;
-            }
-
-            string win64Dir = Path.GetDirectoryName(exePath);
-            string binariesDir = Path.GetDirectoryName(win64Dir);
-            string palRoot = Path.GetDirectoryName(binariesDir);
-            configFilePath = Path.Combine(palRoot, "Saved", "Config", "WindowsServer", "PalWorldSettings.ini");
-
-            if (!File.Exists(configFilePath))
-            {
-                MessageBox.Show($"未找到配置文件：{configFilePath}\n请确认服务端目录结构完整。", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                this.Close();
-                return;
-            }
-
             InitializeComponent();
             this.Font = new Font("微软雅黑", 9F);
             this.AutoScaleMode = AutoScaleMode.Font;
-            LoadConfig();
+            this.Load += ConfigEditForm_Load;
         }
 
-        private void LoadConfig()
+        private void ConfigEditForm_Load(object sender, EventArgs e)
         {
-            string content = File.ReadAllText(configFilePath);
-            var match = Regex.Match(content, @"OptionSettings\s*=\s*\(([^)]*)\)");
+            // 对于第二个构造函数，需要先确定配置文件路径
+            if (mgr != null && string.IsNullOrEmpty(configFilePath))
+            {
+                string exePath = mgr?.CurrentExePath;
+                if (!string.IsNullOrEmpty(exePath) && File.Exists(exePath))
+                {
+                    configFilePath = GameConfigHelper.FindConfigFile(exePath);
+                }
+
+                if (string.IsNullOrEmpty(configFilePath) || !File.Exists(configFilePath))
+                {
+                    using (var openFileDialog = new OpenFileDialog())
+                    {
+                        openFileDialog.Title = "选择 PalWorldSettings.ini";
+                        openFileDialog.Filter = "INI 文件|PalWorldSettings.ini";
+                        openFileDialog.FileName = "PalWorldSettings.ini";
+                        if (openFileDialog.ShowDialog() != DialogResult.OK)
+                        {
+                            this.DialogResult = DialogResult.Cancel;
+                            this.Close();
+                            return;
+                        }
+                        configFilePath = openFileDialog.FileName;
+                    }
+                }
+            }
+
+            // 检查文件是否存在，若不存在则尝试初始化
+            if (!File.Exists(configFilePath))
+            {
+                DialogResult result = MessageBox.Show("配置文件不存在，是否立即从默认模板初始化？", "提示",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                if (result == DialogResult.Yes)
+                {
+                    InitializeConfigFromTemplate();
+                    if (!File.Exists(configFilePath))
+                    {
+                        MessageBox.Show("初始化失败，请手动创建配置文件。", "错误",
+                            MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        this.DialogResult = DialogResult.Cancel;
+                        this.Close();
+                        return;
+                    }
+                }
+                else
+                {
+                    this.DialogResult = DialogResult.Cancel;
+                    this.Close();
+                    return;
+                }
+            }
+
+            initSuccess = true;
+            LoadConfig();
+            CheckAndWarnMissing();
+        }
+
+        // ---- 从模板初始化配置文件 ----
+        private void InitializeConfigFromTemplate()
+        {
+            if (string.IsNullOrEmpty(configFilePath)) return;
+
+            string templatePath = null;
+            if (mgr != null && !string.IsNullOrEmpty(mgr.CurrentExePath))
+            {
+                string exePath = mgr.CurrentExePath;
+                string win64Dir = Path.GetDirectoryName(exePath);
+                string binariesDir = Path.GetDirectoryName(win64Dir);
+                string palRoot = Path.GetDirectoryName(binariesDir);
+                string defaultTemplate = Path.Combine(palRoot, "DefaultPalWorldSettings.ini");
+                if (File.Exists(defaultTemplate))
+                    templatePath = defaultTemplate;
+            }
+
+            if (string.IsNullOrEmpty(templatePath) || !File.Exists(templatePath))
+            {
+                DialogResult result = MessageBox.Show(
+                    "未找到 DefaultPalWorldSettings.ini，是否手动选择该模板文件？",
+                    "提示", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                if (result != DialogResult.Yes)
+                    return;
+
+                using (var openFileDialog = new OpenFileDialog())
+                {
+                    openFileDialog.Title = "请选择 DefaultPalWorldSettings.ini（官方默认配置模板）";
+                    openFileDialog.Filter = "INI 文件|DefaultPalWorldSettings.ini";
+                    openFileDialog.FileName = "DefaultPalWorldSettings.ini";
+                    if (openFileDialog.ShowDialog() != DialogResult.OK)
+                        return;
+                    templatePath = openFileDialog.FileName;
+                }
+
+                if (!File.Exists(templatePath))
+                {
+                    MessageBox.Show("未选择有效的模板文件。", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+            }
+
+            string templateContent = File.ReadAllText(templatePath);
+            var match = Regex.Match(templateContent, @"OptionSettings\s*=\s*\(([^)]*)\)");
             if (!match.Success)
             {
-                MessageBox.Show("未找到 OptionSettings 行", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show("模板文件中未找到 OptionSettings 行。", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
             }
 
-            optionSettingsLine = match.Groups[1].Value;
-            configPairs = ParseOptionSettings(optionSettingsLine);
-            DisplayConfig();
+            string optionLine = match.Groups[1].Value;
+            var dict = ParseOptionSettings(optionLine);
+            if (!dict.ContainsKey("AdminPassword") || string.IsNullOrEmpty(dict["AdminPassword"]))
+                dict["AdminPassword"] = "1234";
+            dict["RESTAPIEnabled"] = "True";
+
+            var pairList = new List<string>();
+            foreach (var kv in dict)
+            {
+                string key = kv.Key;
+                string val = kv.Value;
+
+                if (key.Equals("DenyTechnologyList", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (string.IsNullOrEmpty(val))
+                        pairList.Add($"{key}=");
+                    else
+                    {
+                        if (!val.StartsWith("(") && !val.EndsWith(")"))
+                            val = $"({val})";
+                        pairList.Add($"{key}={val}");
+                    }
+                    continue;
+                }
+
+                bool needQuote = false;
+                if (GameConfigHelper.AlwaysQuoteKeys.Contains(key))
+                    needQuote = true;
+                else if (GameConfigHelper.NeverQuoteKeys.Contains(key))
+                    needQuote = false;
+                else if (val.StartsWith("(") && val.EndsWith(")"))
+                    needQuote = false;
+                else if (Regex.IsMatch(val, @"^-?\d+(\.\d+)?$") ||
+                         val.Equals("true", StringComparison.OrdinalIgnoreCase) ||
+                         val.Equals("false", StringComparison.OrdinalIgnoreCase))
+                    needQuote = false;
+                else
+                    needQuote = true;
+
+                if (string.IsNullOrEmpty(val))
+                {
+                    pairList.Add($"{key}=\"\"");
+                    continue;
+                }
+                if (val.StartsWith("\"") && val.EndsWith("\""))
+                {
+                    pairList.Add($"{key}={val}");
+                    continue;
+                }
+                if (needQuote)
+                    val = $"\"{val}\"";
+                pairList.Add($"{key}={val}");
+            }
+
+            string newOptionLine = string.Join(",", pairList);
+            string finalContent = $"; This configuration file is auto-generated by PalServerManager.\n[/Script/Pal.PalGameWorldSettings]\nOptionSettings=({newOptionLine})";
+
+            string dir = Path.GetDirectoryName(configFilePath);
+            if (!Directory.Exists(dir))
+                Directory.CreateDirectory(dir);
+
+            File.WriteAllText(configFilePath, finalContent);
+            MessageBox.Show("配置文件已从默认模板初始化。", "成功", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
+        // ---- 加载配置 ----
+        private void LoadConfig()
+        {
+            try
+            {
+                string content = File.ReadAllText(configFilePath);
+                int start = content.IndexOf("OptionSettings", StringComparison.OrdinalIgnoreCase);
+                if (start < 0)
+                {
+                    dgvConfig.Rows.Clear();
+                    MessageBox.Show("配置文件中未找到 OptionSettings 行，请点击“初始化配置”按钮创建默认配置，或手动修正。", "提示", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+                int eq = content.IndexOf('=', start);
+                if (eq < 0)
+                {
+                    dgvConfig.Rows.Clear();
+                    MessageBox.Show("OptionSettings 格式错误，缺少等号。", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+                int openParen = content.IndexOf('(', eq);
+                if (openParen < 0)
+                {
+                    dgvConfig.Rows.Clear();
+                    MessageBox.Show("OptionSettings 缺少左括号。", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+                int closeParen = FindMatchingBracket(content, openParen);
+                if (closeParen < 0)
+                {
+                    dgvConfig.Rows.Clear();
+                    MessageBox.Show("括号不匹配。", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+                optionSettingsLine = content.Substring(openParen + 1, closeParen - openParen - 1);
+                configPairs = ParseOptionSettings(optionSettingsLine);
+                DisplayConfig();
+            }
+            catch (Exception ex)
+            {
+                dgvConfig.Rows.Clear();
+                MessageBox.Show($"加载配置失败: {ex.Message}\n请点击“初始化配置”按钮。", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private int FindMatchingBracket(string text, int openPos)
+        {
+            int depth = 0;
+            for (int i = openPos; i < text.Length; i++)
+            {
+                if (text[i] == '(') depth++;
+                else if (text[i] == ')')
+                {
+                    depth--;
+                    if (depth == 0) return i;
+                }
+            }
+            return -1;
+        }
+
+        private void CheckAndWarnMissing()
+        {
+            if (string.IsNullOrEmpty(configFilePath) || !File.Exists(configFilePath)) return;
+            var (valid, missing) = GameConfigHelper.CheckRequiredKeys(configFilePath);
+            if (!valid)
+            {
+                string msg = "配置文件中缺少以下必要项，请补全后保存：\n" + string.Join("\n", missing);
+                MessageBox.Show(msg, "配置不完整", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
         }
 
         private Dictionary<string, string> ParseOptionSettings(string line)
@@ -283,10 +505,11 @@ namespace PalServerManager
             dgvConfig.AutoResizeColumns(DataGridViewAutoSizeColumnsMode.AllCells);
         }
 
+        // ---- 初始化 UI 控件 ----
         private void InitializeComponent()
         {
             this.Text = "配置编辑";
-            this.Size = new Size(650, 520);
+            this.Size = new Size(650, 570);
             this.StartPosition = FormStartPosition.CenterParent;
             this.FormBorderStyle = FormBorderStyle.FixedDialog;
             this.MaximizeBox = false;
@@ -313,14 +536,17 @@ namespace PalServerManager
             dgvConfig.Columns.Add("Value", "值");
             dgvConfig.Columns[0].Width = 200;
             dgvConfig.Columns[1].Width = 350;
+            dgvConfig.Columns[0].ReadOnly = true;
             this.Controls.Add(dgvConfig);
 
             int y = dgvConfig.Bottom + 12;
+            int btnW = 120, btnH = 30;
+
             btnSave = new Button
             {
                 Text = "保存配置",
                 Location = new Point(12, y),
-                Size = new Size(120, 30),
+                Size = new Size(btnW, btnH),
                 FlatStyle = FlatStyle.Flat,
                 FlatAppearance = { BorderSize = 1, BorderColor = Color.FromArgb(100, 200, 100) },
                 BackColor = Color.FromArgb(230, 245, 230),
@@ -333,8 +559,8 @@ namespace PalServerManager
             btnClose = new Button
             {
                 Text = "关闭",
-                Location = new Point(140, y),
-                Size = new Size(120, 30),
+                Location = new Point(12 + btnW + 10, y),
+                Size = new Size(btnW, btnH),
                 FlatStyle = FlatStyle.Flat,
                 FlatAppearance = { BorderSize = 1, BorderColor = Color.FromArgb(180, 180, 180) },
                 BackColor = Color.FromArgb(240, 240, 240),
@@ -344,13 +570,40 @@ namespace PalServerManager
             btnClose.Click += (s, e) => this.Close();
             this.Controls.Add(btnClose);
 
+            btnInitConfig = new Button
+            {
+                Text = "初始化配置",
+                Location = new Point(12 + 2 * (btnW + 10), y),
+                Size = new Size(btnW, btnH),
+                FlatStyle = FlatStyle.Flat,
+                FlatAppearance = { BorderSize = 1, BorderColor = Color.FromArgb(255, 180, 0) },
+                BackColor = Color.FromArgb(255, 245, 225),
+                ForeColor = Color.FromArgb(180, 100, 0),
+                Font = new Font("微软雅黑", 9F)
+            };
+            btnInitConfig.Click += (s, e) =>
+            {
+                if (MessageBox.Show("这将用默认配置覆盖当前文件，确认继续？", "警告", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
+                {
+                    InitializeConfigFromTemplate();
+                    LoadConfig();
+                    CheckAndWarnMissing();
+                    MessageBox.Show("配置已初始化，请检查并保存。", "完成", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+            };
+            this.Controls.Add(btnInitConfig);
+
+            y += btnH + 10;
             Label lblHint = new Label
             {
                 Text = "提示：修改后点击保存，服务端需要重启才能生效。",
-                AutoSize = true,
+                AutoSize = false,
+                Width = this.ClientSize.Width - 24,
+                Height = 30,
                 Font = new Font("微软雅黑", 8F),
                 ForeColor = Color.Gray,
-                Location = new Point(280, y + 6)
+                Location = new Point(12, y),
+                Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top
             };
             this.Controls.Add(lblHint);
         }
@@ -366,18 +619,33 @@ namespace PalServerManager
                 if (string.IsNullOrEmpty(cnName)) continue;
                 string enKey = CnEnMap.FirstOrDefault(x => x.Key == cnName).Value;
                 if (string.IsNullOrEmpty(enKey))
-                    enKey = cnName;
+                {
+                    MessageBox.Show($"未知配置项：“{cnName}”，已跳过。", "警告", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    continue;
+                }
                 updatedPairs[enKey] = val;
             }
 
-            // 使用与 GameConfigHelper 相同的引号规则（直接复制上面的逻辑）
             var pairList = new List<string>();
             foreach (var kv in updatedPairs)
             {
                 string key = kv.Key;
                 string val = kv.Value;
-                bool needQuote = false;
 
+                if (key.Equals("DenyTechnologyList", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (string.IsNullOrEmpty(val))
+                        pairList.Add($"{key}=");
+                    else
+                    {
+                        if (!val.StartsWith("(") && !val.EndsWith(")"))
+                            val = $"({val})";
+                        pairList.Add($"{key}={val}");
+                    }
+                    continue;
+                }
+
+                bool needQuote = false;
                 if (GameConfigHelper.AlwaysQuoteKeys.Contains(key))
                     needQuote = true;
                 else if (GameConfigHelper.NeverQuoteKeys.Contains(key))
@@ -396,16 +664,13 @@ namespace PalServerManager
                     pairList.Add($"{key}=\"\"");
                     continue;
                 }
-
                 if (val.StartsWith("\"") && val.EndsWith("\""))
                 {
                     pairList.Add($"{key}={val}");
                     continue;
                 }
-
                 if (needQuote)
                     val = $"\"{val}\"";
-
                 pairList.Add($"{key}={val}");
             }
 

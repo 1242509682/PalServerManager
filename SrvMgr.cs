@@ -7,6 +7,7 @@ using System.Net.Http;
 using System.Text;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using Microsoft.VisualBasic.Devices; // 添加此引用
 
 namespace PalServerManager
 {
@@ -25,6 +26,7 @@ namespace PalServerManager
         private string svrExePath;
         private string workDir;
         public event Action<string> OnLog;
+        private long lastMemoryCheckTime = 0;
         #endregion
 
         public string CurrentExePath => svrExePath;
@@ -36,6 +38,7 @@ namespace PalServerManager
             var auth = Convert.ToBase64String(Encoding.ASCII.GetBytes($"admin:{cfg.AdmPwd}"));
             http.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Basic", auth);
             http.DefaultRequestHeaders.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
+            http.Timeout = TimeSpan.FromSeconds(30);
 
             monitorTimer = new Timer { Interval = 1000 };
             monitorTimer.Tick += MonitorTick;
@@ -70,6 +73,7 @@ namespace PalServerManager
             Log("启动服务端...");
             var (exe, dir) = ResolvePaths();
             if (!File.Exists(exe)) { Log($"找不到 {exe}。"); return; }
+
             svrExePath = exe;
             workDir = dir;
             var psi = new ProcessStartInfo
@@ -117,7 +121,22 @@ namespace PalServerManager
         #region 附加进程
         public List<Process> GetProcs()
         {
-            return Process.GetProcesses().Where(p => p.ProcessName.Contains("PalServer") && !p.HasExited).ToList();
+            var result = new List<Process>();
+            foreach (var p in Process.GetProcesses())
+            {
+                try
+                {
+                    if (!p.HasExited && p.ProcessName.Contains("PalServer"))
+                    {
+                        result.Add(p);
+                    }
+                }
+                catch (Exception)
+                {
+                    // 忽略无法访问的进程（如系统进程或权限不足）
+                }
+            }
+            return result;
         }
 
         public bool AttachProc(Process p)
@@ -147,6 +166,8 @@ namespace PalServerManager
         #endregion
 
         #region 监控与运行时间累计重启
+        private int restartRetryCount = 0;
+        private const int MaxRestartRetries = 5;
         private async void MonitorTick(object s, EventArgs e)
         {
             if (svrProc == null || svrProc.HasExited)
@@ -164,12 +185,25 @@ namespace PalServerManager
                     svrProc.Dispose();
                     svrProc = null;
                 }
+
+                if (restartRetryCount >= MaxRestartRetries)
+                {
+                    Log($"自动重启尝试已达上限 {MaxRestartRetries} 次，停止监控。");
+                    monitorTimer.Stop();
+                    return;
+                }
+
+                restartRetryCount++;
                 StartSvr();
                 return;
             }
 
+            // 成功运行后重置计数器
+            restartRetryCount = 0;
+
             if (isShuttingDown || !apiReady) return;
 
+            // 检查运行时间累计重启
             if (cfg.RuntimeSeconds > 0)
             {
                 TimeSpan elapsed = DateTime.Now - serverStartTime;
@@ -178,7 +212,39 @@ namespace PalServerManager
                     Log($"运行时间已累计 {elapsed.TotalSeconds:F0} 秒，达到设定的 {cfg.RuntimeSeconds} 秒，正在关服...");
                     isShuttingDown = true;
                     await ShutdownWithAnnounce();
+                    return;
                 }
+            }
+
+            // 检查内存监控
+            if (cfg.EnableMemoryMonitor && IsRun)
+            {
+                long now = DateTime.Now.Ticks / TimeSpan.TicksPerSecond;
+                if (now - lastMemoryCheckTime >= cfg.MemoryCheckIntervalSeconds)
+                {
+                    lastMemoryCheckTime = now;
+                    CheckMemoryAndRestartIfNeeded();
+                }
+            }
+        }
+
+        // ---- 内存监控检查 ----
+        private void CheckMemoryAndRestartIfNeeded()
+        {
+            try
+            {
+                var computerInfo = new ComputerInfo();
+                ulong availableMemoryMB = computerInfo.AvailablePhysicalMemory / 1024 / 1024;
+                if (availableMemoryMB < (ulong)cfg.MemoryThresholdMB)
+                {
+                    Log($"可用内存不足：{availableMemoryMB}MB < {cfg.MemoryThresholdMB}MB，正在自动重启服务器...");
+                    // 异步执行重启，避免阻塞监控线程
+                    Task.Run(async () => await ShutdownRst());
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"内存检查异常：{ex.Message}");
             }
         }
 
@@ -187,7 +253,9 @@ namespace PalServerManager
             if (svrProc == null || svrProc.HasExited) return;
             int waittime = 60;
             string message = string.IsNullOrEmpty(cfg.ShutdownMessage) ? "服务器即将在60秒后重启" : cfg.ShutdownMessage;
-            bool ok = await SendApi("shutdown", $"{{\"waittime\":{waittime},\"message\":\"{message}\"}}");
+            var payload = new { waittime = waittime, message = message };
+            string json = Newtonsoft.Json.JsonConvert.SerializeObject(payload);
+            bool ok = await SendApi("shutdown", json);
             if (!ok)
             {
                 Log("关服命令发送失败，尝试强制终止。");
@@ -265,7 +333,9 @@ namespace PalServerManager
             Log("发送关服命令...");
             int waittime = cfg.ShutdownWaittime > 0 ? cfg.ShutdownWaittime : 5;
             string message = string.IsNullOrEmpty(cfg.ShutdownMessage) ? "服务器即将关闭，将自动重启" : cfg.ShutdownMessage;
-            bool ok = await SendApi("shutdown", $"{{\"waittime\":{waittime},\"message\":\"{message}\"}}");
+            var payload = new { waittime = waittime, message = message };
+            string json = Newtonsoft.Json.JsonConvert.SerializeObject(payload);
+            bool ok = await SendApi("shutdown", json);
             if (!ok)
             {
                 Log("关服失败，强制终止。");
@@ -298,7 +368,9 @@ namespace PalServerManager
                 try
                 {
                     Log("尝试发送关服命令...");
-                    var task = SendApi("shutdown", "{\"waittime\":5,\"message\":\"管理员通过控制台强制关闭服务器\"}");
+                    var payload = new { waittime = 5, message = "管理员通过控制台强制关闭服务器" };
+                    string json = Newtonsoft.Json.JsonConvert.SerializeObject(payload);
+                    var task = SendApi("shutdown", json);
                     apiSuccess = await Task.WhenAny(task, Task.Delay(8000)) == task && task.Result;
 
                     if (apiSuccess)
@@ -366,6 +438,7 @@ namespace PalServerManager
             }
             manualStop = true;
             monitorTimer?.Stop();
+            monitorTimer?.Dispose();
             Log("已强制终止服务端进程。");
         }
         #endregion
@@ -409,12 +482,60 @@ namespace PalServerManager
         public string EnsureGameConfig(string exePath)
         {
             if (string.IsNullOrEmpty(exePath)) return null;
-            string pwd = GameConfigHelper.EnsureConfig(exePath);
-            cfg.AdmPwd = pwd;
-            cfg.Save();
-            UpdateAuthHeader(pwd);
-            Log($"已同步游戏配置：AdminPassword = {pwd}, RESTAPIEnabled=True");
-            return pwd;
+
+            string configPath = GameConfigHelper.FindConfigFile(exePath);
+            if (string.IsNullOrEmpty(configPath) || !File.Exists(configPath))
+            {
+                Log("未自动找到配置文件，请手动选择。");
+                using (var dialog = new OpenFileDialog())
+                {
+                    dialog.Title = "请选择 PalWorldSettings.ini";
+                    dialog.Filter = "INI 文件|PalWorldSettings.ini";
+                    dialog.FileName = "PalWorldSettings.ini";
+                    if (dialog.ShowDialog() != DialogResult.OK)
+                    {
+                        Log("用户取消选择配置文件，服务端可能无法正常工作。");
+                        return null;
+                    }
+                    configPath = dialog.FileName;
+                }
+                if (!File.Exists(configPath))
+                {
+                    Log("选择的配置文件不存在。");
+                    return null;
+                }
+            }
+
+            try
+            {
+                string pwd = GameConfigHelper.EnsureConfig(configPath);
+                cfg.AdmPwd = pwd;
+                cfg.Save();
+                UpdateAuthHeader(pwd);
+                Log($"已同步游戏配置：AdminPassword = {pwd}, RESTAPIEnabled=True");
+                return pwd;
+            }
+            catch (Exception ex)
+            {
+                Log($"配置文件处理失败：{ex.Message}，将打开配置编辑器。");
+                var editor = new ConfigEditForm(configPath);
+                editor.ShowDialog();
+
+                try
+                {
+                    string pwd = GameConfigHelper.EnsureConfig(configPath);
+                    cfg.AdmPwd = pwd;
+                    cfg.Save();
+                    UpdateAuthHeader(pwd);
+                    Log($"手动编辑后配置已同步。");
+                    return pwd;
+                }
+                catch (Exception ex2)
+                {
+                    Log($"手动编辑后仍失败：{ex2.Message}");
+                    return null;
+                }
+            }
         }
 
         private void UpdateAuthHeader(string password)

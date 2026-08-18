@@ -117,7 +117,9 @@ namespace PalServerManager
                 }
                 string userId = dgvBanned.SelectedRows[0].Cells["UserId"].Value?.ToString();
                 if (string.IsNullOrEmpty(userId)) return;
-                bool ok = await mgr.SendApi("unban", $"{{\"userid\":\"{userId}\"}}");
+                var payload = new { userid = userId };
+                string json = Newtonsoft.Json.JsonConvert.SerializeObject(payload);
+                bool ok = await mgr.SendApi("unban", json);
                 if (ok)
                 {
                     // 从列表中移除

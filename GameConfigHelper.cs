@@ -2,6 +2,7 @@
 using System.IO;
 using System.Text.RegularExpressions;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace PalServerManager
 {
@@ -18,14 +19,13 @@ namespace PalServerManager
             "Region",
             "BanListURL",
             "AdditionalDropItemWhenPlayerKillingInPvPMode",
-            "DenyTechnologyList",
             "RandomizerSeed"
         };
 
         // 这些键是数字或布尔，不加引号
         public static readonly HashSet<string> NeverQuoteKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
-            "Difficulty", "RandomizerType", "DeathPenalty",  // 枚举值，不加引号
+            "Difficulty", "RandomizerType", "DeathPenalty",
             "bIsRandomizerPalLevelRandom",
             "DayTimeSpeedRate", "NightTimeSpeedRate", "ExpRate", "PalCaptureRate",
             "PalSpawnNumRate", "PalDamageRateAttack", "PalDamageRateDefense",
@@ -70,21 +70,70 @@ namespace PalServerManager
             "bAllowEnhanceStat_Stamina", "bAllowEnhanceStat_Weight",
             "bAllowEnhanceStat_WorkSpeed", "bEnableBuildingPlayerUIdDisplay",
             "BuildingNameDisplayCacheTTLSeconds",
-            "CrossplayPlatforms" // 括号表达式，不加引号
+            "CrossplayPlatforms",
+            "DenyTechnologyList" // 手动添加，保证不加引号
         };
 
-        public static string EnsureConfig(string exePath)
+        /// <summary>
+        /// 向上搜索 PalWorldSettings.ini，返回完整路径或 null
+        /// </summary>
+        public static string FindConfigFile(string exePath)
         {
             if (string.IsNullOrEmpty(exePath) || !File.Exists(exePath))
-                throw new ArgumentException("无效的服务端 exe 路径");
+                return null;
 
-            string win64Dir = Path.GetDirectoryName(exePath);
-            string binariesDir = Path.GetDirectoryName(win64Dir);
-            string palRoot = Path.GetDirectoryName(binariesDir);
-            string configFile = Path.Combine(palRoot, "Saved", "Config", "WindowsServer", "PalWorldSettings.ini");
+            string currentDir = Path.GetDirectoryName(exePath);
+            int maxLevels = 10;
+            while (maxLevels-- > 0 && currentDir != null)
+            {
+                // 尝试常见路径
+                string candidate1 = Path.Combine(currentDir, "Saved", "Config", "WindowsServer", "PalWorldSettings.ini");
+                if (File.Exists(candidate1)) return candidate1;
 
-            if (!File.Exists(configFile))
-                throw new FileNotFoundException($"未找到配置文件：{configFile}");
+                string candidate2 = Path.Combine(currentDir, "Pal", "Saved", "Config", "WindowsServer", "PalWorldSettings.ini");
+                if (File.Exists(candidate2)) return candidate2;
+
+                // 尝试父目录
+                string parent = Directory.GetParent(currentDir)?.FullName;
+                if (parent != null)
+                {
+                    string candidate3 = Path.Combine(parent, "Saved", "Config", "WindowsServer", "PalWorldSettings.ini");
+                    if (File.Exists(candidate3)) return candidate3;
+                    string candidate4 = Path.Combine(parent, "Pal", "Saved", "Config", "WindowsServer", "PalWorldSettings.ini");
+                    if (File.Exists(candidate4)) return candidate4;
+                }
+
+                currentDir = Directory.GetParent(currentDir)?.FullName;
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// 检查配置文件中是否包含必需的键（AdminPassword, RESTAPIEnabled）
+        /// </summary>
+        public static (bool valid, List<string> missingKeys) CheckRequiredKeys(string configPath)
+        {
+            if (!File.Exists(configPath))
+                return (false, new List<string> { "文件不存在" });
+
+            string content = File.ReadAllText(configPath);
+            var match = Regex.Match(content, @"OptionSettings\s*=\s*\(([^)]*)\)");
+            if (!match.Success)
+                return (false, new List<string> { "OptionSettings 行缺失" });
+
+            var dict = ParseOptionSettings(match.Groups[1].Value);
+            var required = new HashSet<string> { "AdminPassword", "RESTAPIEnabled" };
+            var missing = required.Where(k => !dict.ContainsKey(k) || string.IsNullOrEmpty(dict[k])).ToList();
+            return (missing.Count == 0, missing);
+        }
+
+        /// <summary>
+        /// 确保配置文件完整（补全 AdminPassword 和 RESTAPIEnabled），传入完整文件路径
+        /// </summary>
+        public static string EnsureConfig(string configFile)
+        {
+            if (string.IsNullOrEmpty(configFile) || !File.Exists(configFile))
+                throw new FileNotFoundException("配置文件不存在", configFile);
 
             string content = File.ReadAllText(configFile);
             string pattern = @"OptionSettings\s*=\s*\(([^)]*)\)";
@@ -95,11 +144,8 @@ namespace PalServerManager
             string optionLine = match.Groups[1].Value;
             var dict = ParseOptionSettings(optionLine);
 
-            // 确保 AdminPassword 存在且不为空
             if (!dict.ContainsKey("AdminPassword") || string.IsNullOrEmpty(dict["AdminPassword"]))
                 dict["AdminPassword"] = "1234";
-
-            // 确保 RESTAPIEnabled=True
             dict["RESTAPIEnabled"] = "True";
 
             // 重新构建 OptionSettings 行
@@ -108,53 +154,47 @@ namespace PalServerManager
             {
                 string key = kv.Key;
                 string val = kv.Value;
-                bool needQuote = false;
 
-                // 1. 强制加引号的键
+                // 特殊处理 DenyTechnologyList
+                if (key.Equals("DenyTechnologyList", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (string.IsNullOrEmpty(val))
+                        pairList.Add($"{key}=");
+                    else
+                    {
+                        if (!val.StartsWith("(") && !val.EndsWith(")"))
+                            val = $"({val})";
+                        pairList.Add($"{key}={val}");
+                    }
+                    continue;
+                }
+
+                bool needQuote = false;
                 if (AlwaysQuoteKeys.Contains(key))
-                {
                     needQuote = true;
-                }
-                // 2. 强制不加引号的键（数字/布尔/枚举/括号）
                 else if (NeverQuoteKeys.Contains(key))
-                {
                     needQuote = false;
-                }
-                // 3. 括号表达式
                 else if (val.StartsWith("(") && val.EndsWith(")"))
-                {
                     needQuote = false;
-                }
-                // 4. 纯数字或布尔
                 else if (Regex.IsMatch(val, @"^-?\d+(\.\d+)?$") ||
                          val.Equals("true", StringComparison.OrdinalIgnoreCase) ||
                          val.Equals("false", StringComparison.OrdinalIgnoreCase))
-                {
                     needQuote = false;
-                }
-                // 5. 其他情况（如中文、URL、未知字符串）都加引号
                 else
-                {
                     needQuote = true;
-                }
 
-                // 如果值是空字符串，统一改为 ""
                 if (string.IsNullOrEmpty(val))
                 {
                     pairList.Add($"{key}=\"\"");
                     continue;
                 }
-
-                // 如果已经带引号，不再重复加
                 if (val.StartsWith("\"") && val.EndsWith("\""))
                 {
                     pairList.Add($"{key}={val}");
                     continue;
                 }
-
                 if (needQuote)
                     val = $"\"{val}\"";
-
                 pairList.Add($"{key}={val}");
             }
 
@@ -167,24 +207,14 @@ namespace PalServerManager
 
         public static string ReadAdminPassword(string exePath)
         {
-            if (string.IsNullOrEmpty(exePath) || !File.Exists(exePath))
-                return null;
-
-            string win64Dir = Path.GetDirectoryName(exePath);
-            string binariesDir = Path.GetDirectoryName(win64Dir);
-            string palRoot = Path.GetDirectoryName(binariesDir);
-            string configFile = Path.Combine(palRoot, "Saved", "Config", "WindowsServer", "PalWorldSettings.ini");
-
-            if (!File.Exists(configFile))
-                return null;
+            string configFile = FindConfigFile(exePath);
+            if (string.IsNullOrEmpty(configFile)) return null;
 
             string content = File.ReadAllText(configFile);
             var match = Regex.Match(content, @"OptionSettings\s*=\s*\(([^)]*)\)");
-            if (!match.Success)
-                return null;
+            if (!match.Success) return null;
 
-            string optionLine = match.Groups[1].Value;
-            var dict = ParseOptionSettings(optionLine);
+            var dict = ParseOptionSettings(match.Groups[1].Value);
             return dict.ContainsKey("AdminPassword") ? dict["AdminPassword"] : null;
         }
 

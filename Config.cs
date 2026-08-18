@@ -11,7 +11,7 @@ namespace PalServerManager
         public string AdmPwd { get; set; } = "1234";
 
         [JsonProperty("运行时间累计重启(秒)", Order = 1)]
-        public int RuntimeSeconds { get; set; } = 0; // 0 表示禁用
+        public int RuntimeSeconds { get; set; } = 0;
 
         [JsonProperty("服务端可执行文件", Order = 2)]
         public string SvrExe { get; set; } = "PalServer.exe";
@@ -34,7 +34,6 @@ namespace PalServerManager
         [JsonProperty("强制停止后自动重启", Order = 8)]
         public bool AutoRestart { get; set; } = true;
 
-        // 新增 BanEntry 类
         public class BanEntry
         {
             [JsonProperty("userId")]
@@ -53,7 +52,6 @@ namespace PalServerManager
             public DateTime BanTime { get; set; } = DateTime.Now;
         }
 
-        // 替换原 BanList
         [JsonProperty("封禁玩家列表", Order = 9)]
         public List<BanEntry> BanList { get; set; } = new List<BanEntry>();
 
@@ -80,6 +78,19 @@ namespace PalServerManager
 
         [JsonProperty("广播循环间隔(秒)", Order = 18)]
         public int BroadcastInterval { get; set; } = 60;
+
+        [JsonProperty("启用内存监控自动重启", Order = 19)]
+        public bool EnableMemoryMonitor { get; set; } = false;
+
+        [JsonProperty("内存阈值(MB)", Order = 20)]
+        public int MemoryThresholdMB { get; set; } = 1024;
+
+        [JsonProperty("内存检查间隔(秒)", Order = 21)]
+        public int MemoryCheckIntervalSeconds { get; set; } = 60;
+
+        // 新增：Mod文件安装映射（Mod名称 -> 相对路径 -> 完整目标路径）
+        [JsonProperty("MOD文件安装映射", Order = 22)]
+        public Dictionary<string, Dictionary<string, string>> ModFileInstallMap { get; set; } = new();
 
         private static string CfgPath = "config.json";
 

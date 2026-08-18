@@ -267,7 +267,8 @@ public class BroadcastForm : Form
             MessageBox.Show("请输入消息内容。", "提示", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
-        bool ok = await mgr.SendApi("announce", $"{{\"message\":\"{msg}\"}}");
+        string json = Newtonsoft.Json.JsonConvert.SerializeObject(new { message = msg });
+        bool ok = await mgr.SendApi("announce", json);
         MessageBox.Show(ok ? "广播发送成功。" : "广播发送失败。", ok ? "成功" : "失败", MessageBoxButtons.OK, ok ? MessageBoxIcon.Information : MessageBoxIcon.Error);
         if (ok) this.Close();
     }
@@ -296,7 +297,8 @@ public class BroadcastForm : Form
         _ = Task.Run(async () =>
         {
             await Task.Delay(delay);
-            await mgr.SendApi("announce", $"{{\"message\":\"{msg}\"}}");
+            string json = Newtonsoft.Json.JsonConvert.SerializeObject(new { message = msg });
+            await mgr.SendApi("announce", json);
         });
         MessageBox.Show($"广播已安排在 {target:HH:mm:ss} 发送。", "成功", MessageBoxButtons.OK, MessageBoxIcon.Information);
         this.Close();
@@ -389,7 +391,8 @@ public class BroadcastForm : Form
     {
         if (currentIndex < 0 || currentIndex >= messages.Count) return;
         string msg = messages[currentIndex];
-        bool ok = await mgr.SendApi("announce", $"{{\"message\":\"{msg}\"}}");
+        string json = Newtonsoft.Json.JsonConvert.SerializeObject(new { message = msg });
+        bool ok = await mgr.SendApi("announce", json);
         // 修复：使用 mgr.Log 输出日志
         mgr.Log($"[广播] 发送第 {currentIndex + 1}/{messages.Count} 条: \"{msg}\" {(ok ? "成功" : "失败")}");
     }

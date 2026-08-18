@@ -11,7 +11,10 @@ namespace PalServerManager
         private NumericUpDown numRuntime;
         private NumericUpDown numShutdownWait;
         private TextBox txtShutdownMsg;
-        private Button btnSaveConfig, btnRestart, btnKill, btnEditConfig, btnInfo, btnMetrics, btnClose;
+        private CheckBox chkEnableMemMonitor;
+        private NumericUpDown numMemoryThreshold;
+        private NumericUpDown numMemoryCheckInterval;
+        private Button btnSaveConfig, btnRestart, btnKill, btnInfo, btnMetrics, btnClose;
 
         public ControlForm(SrvMgr manager, Config config)
         {
@@ -20,16 +23,21 @@ namespace PalServerManager
             InitializeComponent();
             this.Font = new Font("微软雅黑", 9F);
             this.AutoScaleMode = AutoScaleMode.Font;
+
+            // 加载配置值
             numRuntime.Value = cfg.RuntimeSeconds;
             numShutdownWait.Value = cfg.ShutdownWaittime > 0 ? cfg.ShutdownWaittime : 5;
             txtShutdownMsg.Text = cfg.ShutdownMessage;
+            chkEnableMemMonitor.Checked = cfg.EnableMemoryMonitor;
+            numMemoryThreshold.Value = cfg.MemoryThresholdMB > 0 ? cfg.MemoryThresholdMB : 1024;
+            numMemoryCheckInterval.Value = cfg.MemoryCheckIntervalSeconds > 0 ? cfg.MemoryCheckIntervalSeconds : 60;
         }
 
         private void InitializeComponent()
         {
             this.Text = "服务器控制";
-            this.Size = new Size(580, 480);
-            this.MinimumSize = new Size(580, 480);
+            this.Size = new Size(640, 580);
+            this.MinimumSize = new Size(640, 580);
             this.StartPosition = FormStartPosition.CenterParent;
             this.FormBorderStyle = FormBorderStyle.FixedDialog;
             this.MaximizeBox = false;
@@ -47,9 +55,10 @@ namespace PalServerManager
                 Padding = new Padding(12),
                 BackColor = Color.Transparent
             };
-            mainTable.RowStyles.Add(new RowStyle(SizeType.Absolute, 160));
+            mainTable.RowStyles.Add(new RowStyle(SizeType.Absolute, 220));
             mainTable.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
+            // ---- 配置区域 ----
             var configGroup = new GroupBox
             {
                 Text = "⚙️ 服务器配置",
@@ -63,18 +72,22 @@ namespace PalServerManager
             {
                 Dock = DockStyle.Fill,
                 ColumnCount = 3,
-                RowCount = 3,
+                RowCount = 4,
                 BackColor = Color.Transparent
             };
             configTable.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 130));
             configTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             configTable.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 110));
-            for (int i = 0; i < 3; i++)
-                configTable.RowStyles.Add(new RowStyle(SizeType.Absolute, 35));
+            // 前三行固定高度，第四行自动
+            configTable.RowStyles.Add(new RowStyle(SizeType.Absolute, 35));
+            configTable.RowStyles.Add(new RowStyle(SizeType.Absolute, 35));
+            configTable.RowStyles.Add(new RowStyle(SizeType.Absolute, 35));
+            configTable.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
+            // ---- 行0：运行累计重启 ----
             configTable.Controls.Add(new Label
             {
-                Text = "运行累计重启(秒):",
+                Text = "定时重启(秒):",
                 AutoSize = false,
                 TextAlign = ContentAlignment.MiddleLeft,
                 Font = lblFont,
@@ -94,6 +107,7 @@ namespace PalServerManager
             };
             configTable.Controls.Add(numRuntime, 1, 0);
 
+            // ---- 行1：关服等待 ----
             configTable.Controls.Add(new Label
             {
                 Text = "关服等待(秒):",
@@ -116,6 +130,7 @@ namespace PalServerManager
             };
             configTable.Controls.Add(numShutdownWait, 1, 1);
 
+            // ---- 行2：关服消息 + 保存按钮 ----
             configTable.Controls.Add(new Label
             {
                 Text = "关服消息:",
@@ -154,14 +169,99 @@ namespace PalServerManager
                 string msg = txtShutdownMsg.Text.Trim();
                 mgr.UpdateShutdownConfig(wait, msg);
 
-                MessageBox.Show($"配置已保存：\n运行累计重启 {runtime} 秒\n关服等待 {wait} 秒\n消息 \"{msg}\"",
+                cfg.EnableMemoryMonitor = chkEnableMemMonitor.Checked;
+                cfg.MemoryThresholdMB = (int)numMemoryThreshold.Value;
+                cfg.MemoryCheckIntervalSeconds = (int)numMemoryCheckInterval.Value;
+                cfg.Save();
+
+                MessageBox.Show($"配置已保存：\n运行累计重启 {runtime} 秒\n关服等待 {wait} 秒\n消息 \"{msg}\"\n内存监控 {(cfg.EnableMemoryMonitor ? "启用" : "禁用")}\n阈值 {cfg.MemoryThresholdMB} MB\n检查间隔 {cfg.MemoryCheckIntervalSeconds} 秒",
                     "成功", MessageBoxButtons.OK, MessageBoxIcon.Information);
             };
             configTable.Controls.Add(btnSaveConfig, 2, 2);
 
+            // ---- 行3：内存监控（所有控件放在同一个 FlowLayoutPanel 中跨三列） ----
+            var memPanel = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = false,
+                BackColor = Color.Transparent,
+                Margin = new Padding(0, 6, 0, 6) // 上下留白，垂直居中
+            };
+
+            // 标签
+            memPanel.Controls.Add(new Label
+            {
+                Text = "剩余内存重启:",
+                AutoSize = true,
+                Font = lblFont,
+                ForeColor = Color.FromArgb(40, 60, 90),
+                Margin = new Padding(0, 4, 12, 0)
+            });
+
+            // 启用复选框
+            chkEnableMemMonitor = new CheckBox
+            {
+                Text = "启用",
+                AutoSize = true,
+                Font = ctrlFont,
+                ForeColor = Color.FromArgb(40, 60, 90),
+                Margin = new Padding(0, 4, 12, 0)
+            };
+            memPanel.Controls.Add(chkEnableMemMonitor);
+
+            // 阈值标签 + 数值
+            memPanel.Controls.Add(new Label
+            {
+                Text = "阈值(MB):",
+                AutoSize = true,
+                Font = ctrlFont,
+                ForeColor = Color.FromArgb(40, 60, 90),
+                Margin = new Padding(0, 4, 4, 0)
+            });
+            numMemoryThreshold = new NumericUpDown
+            {
+                Minimum = 100,
+                Maximum = 32768,
+                Value = 1024,
+                Width = 80,
+                Font = ctrlFont,
+                BackColor = Color.White,
+                ForeColor = Color.FromArgb(30, 60, 90),
+                Margin = new Padding(0, 2, 12, 0)
+            };
+            memPanel.Controls.Add(numMemoryThreshold);
+
+            // 间隔标签 + 数值
+            memPanel.Controls.Add(new Label
+            {
+                Text = "间隔(秒):",
+                AutoSize = true,
+                Font = ctrlFont,
+                ForeColor = Color.FromArgb(40, 60, 90),
+                Margin = new Padding(0, 4, 4, 0)
+            });
+            numMemoryCheckInterval = new NumericUpDown
+            {
+                Minimum = 5,
+                Maximum = 3600,
+                Value = 60,
+                Width = 80,
+                Font = ctrlFont,
+                BackColor = Color.White,
+                ForeColor = Color.FromArgb(30, 60, 90),
+                Margin = new Padding(0, 2, 0, 0)
+            };
+            memPanel.Controls.Add(numMemoryCheckInterval);
+
+            // 将 memPanel 放置在第0列，跨3列
+            configTable.Controls.Add(memPanel, 0, 3);
+            configTable.SetColumnSpan(memPanel, 3);
+
             configGroup.Controls.Add(configTable);
             mainTable.Controls.Add(configGroup, 0, 0);
 
+            // ---- 操作区域 ----
             var actionGroup = new GroupBox
             {
                 Text = "🔧 服务器操作",
@@ -225,27 +325,19 @@ namespace PalServerManager
             };
             btnTable.Controls.Add(btnKill, 1, 0);
 
-            btnEditConfig = new Button
+            btnClose = new Button
             {
-                Text = "📝 配置编辑",
+                Text = "关闭",
                 Size = new Size(btnW, btnH),
                 Anchor = AnchorStyles.None,
                 FlatStyle = FlatStyle.Flat,
-                FlatAppearance = { BorderSize = 1, BorderColor = Color.FromArgb(100, 200, 200) },
-                BackColor = Color.FromArgb(225, 245, 245),
-                ForeColor = Color.FromArgb(0, 100, 120),
+                FlatAppearance = { BorderSize = 1, BorderColor = Color.FromArgb(180, 180, 180) },
+                BackColor = Color.FromArgb(240, 240, 240),
+                ForeColor = Color.FromArgb(80, 80, 80),
                 Font = ctrlFont
             };
-            btnEditConfig.Click += (s, e) =>
-            {
-                if (!mgr.IsRun)
-                {
-                    MessageBox.Show("服务端未运行，无法编辑配置。", "提示", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    return;
-                }
-                new ConfigEditForm(mgr).ShowDialog(this);
-            };
-            btnTable.Controls.Add(btnEditConfig, 2, 0);
+            btnClose.Click += (s, e) => this.Close();
+            btnTable.Controls.Add(btnClose, 2, 0);
 
             btnInfo = new Button
             {
@@ -286,20 +378,6 @@ namespace PalServerManager
                 new InfoForm("服务器指标", json).ShowDialog(this);
             };
             btnTable.Controls.Add(btnMetrics, 1, 1);
-
-            btnClose = new Button
-            {
-                Text = "关闭",
-                Size = new Size(btnW, btnH),
-                Anchor = AnchorStyles.None,
-                FlatStyle = FlatStyle.Flat,
-                FlatAppearance = { BorderSize = 1, BorderColor = Color.FromArgb(180, 180, 180) },
-                BackColor = Color.FromArgb(240, 240, 240),
-                ForeColor = Color.FromArgb(80, 80, 80),
-                Font = ctrlFont
-            };
-            btnClose.Click += (s, e) => this.Close();
-            btnTable.Controls.Add(btnClose, 2, 1);
 
             actionGroup.Controls.Add(btnTable);
             mainTable.Controls.Add(actionGroup, 0, 1);

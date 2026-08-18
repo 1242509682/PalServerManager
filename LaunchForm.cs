@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Diagnostics;
 using System.Drawing;
+using System.IO;
 using System.Windows.Forms;
 
 namespace PalServerManager;
@@ -11,9 +12,7 @@ public class LaunchForm : Form
     private Config cfg;
     private Ue4Mgr ue4;
     private TextBox txtExePath;
-    private Button btnBrowse, btnAttach, btnStart, btnOpenDir;
-    private ListBox lstProcesses;
-    private Button btnRefresh;
+    private Button btnBrowse, btnAttach, btnStart, btnOpenDir, btnClose;
 
     public LaunchForm(SrvMgr manager, Config config, Ue4Mgr ue4Manager)
     {
@@ -24,23 +23,12 @@ public class LaunchForm : Form
         this.Font = new Font("微软雅黑", 9F);
         this.AutoScaleMode = AutoScaleMode.Font;
         txtExePath.Text = cfg.SvrExe;
-        RefreshProcessList();
-    }
-
-    private void RefreshProcessList()
-    {
-        lstProcesses.Items.Clear();
-        var procs = mgr.GetProcs();
-        foreach (var p in procs)
-            lstProcesses.Items.Add($"PID:{p.Id}  {p.ProcessName}");
-        if (lstProcesses.Items.Count > 0)
-            lstProcesses.SelectedIndex = 0;
     }
 
     private void InitializeComponent()
     {
         this.Text = "启动服务 / 附加进程";
-        this.Size = new Size(580, 350);
+        this.Size = new Size(580, 220); // 缩小高度，因为移除了列表
         this.StartPosition = FormStartPosition.CenterParent;
         this.FormBorderStyle = FormBorderStyle.FixedDialog;
         this.MaximizeBox = false;
@@ -85,56 +73,37 @@ public class LaunchForm : Form
             ForeColor = Color.FromArgb(0, 80, 180),
             Font = ctrlFont
         };
+
         btnBrowse.Click += (s, e) =>
         {
-            using var dlg = new OpenFileDialog { Filter = "可执行文件|*.exe", Title = "选择 PalServer.exe" };
+            using var dlg = new OpenFileDialog
+            {
+                Filter = "PalServer 可执行文件|PalServer.exe|所有文件|*.*",
+                Title = "选择 PalServer.exe",
+                FileName = "PalServer.exe"
+            };
             if (dlg.ShowDialog() == DialogResult.OK)
-                txtExePath.Text = dlg.FileName;
+            {
+                string selectedFile = dlg.FileName;
+                if (Path.GetFileName(selectedFile).Equals("PalServer.exe", StringComparison.OrdinalIgnoreCase))
+                {
+                    txtExePath.Text = selectedFile;
+                }
+                else
+                {
+                    MessageBox.Show("请选择名称为 PalServer.exe 的文件。", "提示", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    // 不清除已有文本，但也不设置新路径
+                }
+            }
         };
         this.Controls.Add(btnBrowse);
 
-        y += 40;
+        y += 50;
 
-        // ---- 附加进程列表 ----
-        Label lblProcs = new Label
-        {
-            Text = "运行中的服务端进程:",
-            AutoSize = true,
-            Font = lblFont,
-            ForeColor = Color.FromArgb(40, 60, 90),
-            Location = new Point(left, y + 4)
-        };
-        this.Controls.Add(lblProcs);
-
-        lstProcesses = new ListBox
-        {
-            Location = new Point(left, y + 28),
-            Size = new Size(420, 160),
-            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
-            Font = ctrlFont,
-            BackColor = Color.White,
-            ForeColor = Color.FromArgb(30, 60, 90)
-        };
-        this.Controls.Add(lstProcesses);
-
-        btnRefresh = new Button
-        {
-            Text = "刷新",
-            Location = new Point(left + 430, y + 28),
-            Size = new Size(80, 35),
-            FlatStyle = FlatStyle.Flat,
-            FlatAppearance = { BorderSize = 1, BorderColor = Color.FromArgb(100, 200, 200) },
-            BackColor = Color.FromArgb(225, 245, 245),
-            ForeColor = Color.FromArgb(0, 100, 120),
-            Font = ctrlFont
-        };
-        btnRefresh.Click += (s, e) => RefreshProcessList();
-        this.Controls.Add(btnRefresh);
-
-        y += 200;
-
-        // ---- 按钮 ----
+        // ---- 操作按钮 ----
         int btnW = 100, btnH = 32;
+        int spacing = 10;
+
         btnAttach = new Button
         {
             Text = "附加进程",
@@ -148,14 +117,32 @@ public class LaunchForm : Form
         };
         btnAttach.Click += (s, e) =>
         {
-            if (lstProcesses.SelectedIndex < 0)
+            // 自动查找并附加 PalServer-Win64-Shipping-Cmd 进程
+            if (mgr.IsRun)
             {
-                MessageBox.Show("请先选择一个进程。", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show("已有服务端进程被管理，无需重复附加。", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
+
             var procs = mgr.GetProcs();
-            var proc = procs[lstProcesses.SelectedIndex];
-            if (mgr.AttachProc(proc))
+            Process target = null;
+            foreach (var p in procs)
+            {
+                // 进程名精确匹配（不包含 .exe）
+                if (p.ProcessName == "PalServer-Win64-Shipping-Cmd")
+                {
+                    target = p;
+                    break;
+                }
+            }
+
+            if (target == null)
+            {
+                MessageBox.Show("未找到正在运行的 PalServer-Win64-Shipping-Cmd 进程。\n请确保服务端已启动。", "提示", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            if (mgr.AttachProc(target))
             {
                 ue4?.SetWinDirFromExe(mgr.CurrentExePath);
                 mgr.EnsureGameConfig(mgr.CurrentExePath);
@@ -171,7 +158,7 @@ public class LaunchForm : Form
         btnStart = new Button
         {
             Text = "启动服务",
-            Location = new Point(left + btnW + 10, y),
+            Location = new Point(left + btnW + spacing, y),
             Size = new Size(btnW, btnH),
             FlatStyle = FlatStyle.Flat,
             FlatAppearance = { BorderSize = 1, BorderColor = Color.FromArgb(0, 180, 255) },
@@ -188,7 +175,7 @@ public class LaunchForm : Form
             }
             mgr.SetExe(txtExePath.Text);
             mgr.StartSvr();
-            mgr.EnsureGameConfig(txtExePath.Text); // 确保配置正确
+            mgr.EnsureGameConfig(txtExePath.Text);
             ue4?.SetWinDirFromExe(mgr.CurrentExePath);
             MessageBox.Show("服务端启动成功。", "成功", MessageBoxButtons.OK, MessageBoxIcon.Information);
             this.DialogResult = DialogResult.OK;
@@ -199,7 +186,7 @@ public class LaunchForm : Form
         btnOpenDir = new Button
         {
             Text = "打开目录",
-            Location = new Point(left + 2 * (btnW + 10), y),
+            Location = new Point(left + 2 * (btnW + spacing), y),
             Size = new Size(btnW, btnH),
             FlatStyle = FlatStyle.Flat,
             FlatAppearance = { BorderSize = 1, BorderColor = Color.FromArgb(180, 180, 200) },
@@ -228,10 +215,10 @@ public class LaunchForm : Form
         };
         this.Controls.Add(btnOpenDir);
 
-        Button btnClose = new Button
+        btnClose = new Button
         {
             Text = "关闭",
-            Location = new Point(left + 3 * (btnW + 10), y),
+            Location = new Point(left + 3 * (btnW + spacing), y),
             Size = new Size(btnW, btnH),
             FlatStyle = FlatStyle.Flat,
             FlatAppearance = { BorderSize = 1, BorderColor = Color.FromArgb(180, 180, 180) },
@@ -241,11 +228,5 @@ public class LaunchForm : Form
         };
         btnClose.Click += (s, e) => { this.DialogResult = DialogResult.Cancel; this.Close(); };
         this.Controls.Add(btnClose);
-
-        // 自动刷新进程列表
-        Timer refreshTimer = new Timer { Interval = cfg.LaunchRefreshInterval > 0 ? cfg.LaunchRefreshInterval : 2000 };
-        refreshTimer.Tick += (s, e) => RefreshProcessList();
-        refreshTimer.Start();
-        this.FormClosed += (s, e) => refreshTimer.Stop();
     }
 }

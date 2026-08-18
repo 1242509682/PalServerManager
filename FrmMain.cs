@@ -15,9 +15,11 @@ namespace PalServerManager
         private RichTextBox rtbLog;
         private StatusStrip stBar;
         private ToolStripStatusLabel lblServerState, lblUe4State, lblStatusInfo;
-        private Button btnLaunch, btnControl, btnBroadcast, btnPunish, btnUe4;
+        private Button btnLaunch, btnControl, btnBroadcast, btnPunish, btnUe4, btnConfigEdit;
 
         private ToolTip toolTip1;
+
+        private Button btnMod;
 
         public FrmMain()
         {
@@ -39,28 +41,45 @@ namespace PalServerManager
             mgr.OnLog += AppendLog;
             if (ue4 != null) ue4.OnLog += AppendLog;
 
-            if (!string.IsNullOrEmpty(cfg.SvrExe) && File.Exists(cfg.SvrExe))
+            // ---- 初始化 UE4SS 路径（不再强制同步配置，避免启动弹窗） ----
+            if (ue4 != null)
             {
-                try
+                bool pathSet = false;
+                if (!string.IsNullOrEmpty(cfg.SvrExe) && File.Exists(cfg.SvrExe))
                 {
-                    mgr.EnsureGameConfig(cfg.SvrExe);
+                    // 只设置路径，不调用 EnsureGameConfig（该函数可能弹窗）
+                    pathSet = ue4.SetWinDirFromExe(cfg.SvrExe);
+                    if (pathSet)
+                    {
+                        // 静默检查配置文件是否存在，仅记录日志
+                        string configPath = GameConfigHelper.FindConfigFile(cfg.SvrExe);
+                        if (string.IsNullOrEmpty(configPath) || !File.Exists(configPath))
+                            AppendLog("未找到 PalWorldSettings.ini，启动服务时将自动处理。");
+                        else
+                            AppendLog("已找到配置文件，启动服务时会自动同步密码。");
+                    }
                 }
-                catch (Exception ex)
+                if (!pathSet)
                 {
-                    AppendLog($"游戏配置检查失败：{ex.Message}");
+                    AppendLog("配置路径无效，尝试自动搜索 UE4SS...");
+                    if (ue4.AutoDetect())
+                        AppendLog("自动搜索定位到 UE4SS 目录。");
+                    else
+                        AppendLog("未找到 UE4SS 安装，请通过“启动服务”指定路径后再安装。");
                 }
-                if (ue4 != null) ue4.SetWinDirFromExe(cfg.SvrExe);
-            }
-            else if (ue4 == null)
-            {
-                AppendLog("UE4SS 初始化失败，请检查依赖。");
             }
 
             btnLaunch.Click += (s, e) => new LaunchForm(mgr, cfg, ue4).ShowDialog(this);
             btnControl.Click += (s, e) => new ControlForm(mgr, cfg).ShowDialog(this);
             btnBroadcast.Click += (s, e) => new BroadcastForm(mgr).ShowDialog(this);
             btnPunish.Click += (s, e) => new PunishForm(mgr, cfg).ShowDialog(this);
-            btnUe4.Click += (s, e) => new Ue4Form(ue4).ShowDialog(this);
+            btnUe4.Click += (s, e) => new Ue4Form(ue4, mgr).ShowDialog(this);
+            btnConfigEdit.Click += (s, e) => new ConfigEditForm(mgr).ShowDialog(this);
+            btnMod.Click += (s, e) =>
+            {
+                var modMgr = new ModManager(cfg, ue4);
+                new ModForm(modMgr).ShowDialog(this);
+            };
 
             uiTmr = new Timer { Interval = cfg.UiRefreshInterval };
             uiTmr.Tick += (s, e) =>
@@ -92,11 +111,10 @@ namespace PalServerManager
             };
             uiTmr.Start();
 
-            // ★ 修正退出事件
             this.FormClosing += (s, e) =>
             {
                 uiTmr?.Stop();
-                mgr?.TerminateNow(); // 同步强制终止
+                mgr?.TerminateNow();
             };
 
             AppendLog("主界面已加载。点击对应按钮管理服务器。");
@@ -130,16 +148,16 @@ namespace PalServerManager
         private void InitializeComponent()
         {
             this.Text = "Palworld 服务器管理器 by 羽学 QQ1242509682";
-            this.Size = new Size(800, 600);
+            this.Size = new Size(950, 600);
             this.StartPosition = FormStartPosition.CenterScreen;
             this.BackColor = Color.FromArgb(240, 244, 248);
             this.FormBorderStyle = FormBorderStyle.Sizable;
-            this.MinimumSize = new Size(700, 500);
+            this.MinimumSize = new Size(850, 500);
 
             rtbLog = new RichTextBox
             {
                 Location = new Point(12, 12),
-                Size = new Size(764, 420),
+                Size = new Size(this.ClientSize.Width - 24, 420),
                 Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right,
                 BackColor = Color.White,
                 ForeColor = Color.FromArgb(30, 60, 90),
@@ -150,9 +168,9 @@ namespace PalServerManager
             rtbLog.ContextMenuStrip = CreateLogContextMenu();
             this.Controls.Add(rtbLog);
 
-            int btnWidth = 120, btnHeight = 34;
-            int spacing = 12;
-            int totalWidth = btnWidth * 5 + spacing * 4;
+            int btnWidth = 125, btnHeight = 34;
+            int spacing = 6;
+            int totalWidth = btnWidth * 7 + spacing * 6; // 改为7个按钮
             int startX = (this.ClientSize.Width - totalWidth) / 2;
             int y = rtbLog.Bottom + 15;
 
@@ -220,6 +238,33 @@ namespace PalServerManager
                 Font = new Font("微软雅黑", 9F)
             };
             this.Controls.Add(btnUe4);
+
+            btnConfigEdit = new Button
+            {
+                Text = "📝 配置编辑",
+                Location = new Point(startX + 5 * (btnWidth + spacing), y),
+                Size = new Size(btnWidth, btnHeight),
+                FlatStyle = FlatStyle.Flat,
+                FlatAppearance = { BorderSize = 1, BorderColor = Color.FromArgb(100, 200, 200) },
+                BackColor = Color.FromArgb(225, 245, 245),
+                ForeColor = Color.FromArgb(0, 100, 120),
+                Font = new Font("微软雅黑", 9F)
+            };
+            this.Controls.Add(btnConfigEdit);
+
+            // 新增 btnMod
+            btnMod = new Button
+            {
+                Text = "📦 MOD管理",
+                Location = new Point(startX + 6 * (btnWidth + spacing), y),
+                Size = new Size(btnWidth, btnHeight),
+                FlatStyle = FlatStyle.Flat,
+                FlatAppearance = { BorderSize = 1, BorderColor = Color.FromArgb(100, 200, 100) },
+                BackColor = Color.FromArgb(230, 245, 230),
+                ForeColor = Color.FromArgb(0, 120, 0),
+                Font = new Font("微软雅黑", 9F)
+            };
+            this.Controls.Add(btnMod);
 
             stBar = new StatusStrip
             {
